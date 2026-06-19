@@ -31,6 +31,7 @@ from textual.widgets import Button, Label, Static, TextArea, Tree
 from textual.widgets.tree import TreeNode
 
 from strix.config import load_settings
+from strix.core.hooks import BudgetExceededError
 from strix.core.runner import run_strix_scan
 from strix.interface.tui.live_view import TuiLiveView
 from strix.interface.tui.messages import send_user_message_to_agent
@@ -1369,21 +1370,30 @@ class StrixTUIApp(App):  # type: ignore[misc]
                                 local_sources=getattr(self.args, "local_sources", None) or [],
                                 coordinator=self.coordinator,
                                 interactive=True,
+                                max_budget_usd=getattr(self.args, "max_budget_usd", None),
                                 event_sink=self._capture_sdk_event,
                             ),
                         )
 
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     logger.info("Scan interrupted by user")
+                except BudgetExceededError:
+                    # Defensive: the runner stops the scan cleanly on budget and
+                    # returns, so this normally never propagates. Treat it as a
+                    # graceful stop, not a scan error, if it ever does.
+                    logger.info("Scan stopped: --max-budget-usd limit reached")
                 except (ConnectionError, TimeoutError) as e:
                     logging.exception("Network error during scan")
                     self._scan_error = e
+                    self._notify_scan_error(e)
                 except RuntimeError as e:
                     logging.exception("Runtime error during scan")
                     self._scan_error = e
+                    self._notify_scan_error(e)
                 except Exception as e:
                     logging.exception("Unexpected error during scan")
                     self._scan_error = e
+                    self._notify_scan_error(e)
                 finally:
                     with contextlib.suppress(Exception):
                         loop.run_until_complete(
@@ -1398,6 +1408,15 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         self._scan_thread = threading.Thread(target=scan_target, daemon=True)
         self._scan_thread.start()
+
+    def _notify_scan_error(self, exc: Exception) -> None:
+        """Dispatch an error toast from any thread."""
+        with contextlib.suppress(Exception):
+            self.call_from_thread(
+                self.notify,
+                f"Scan failed: {type(exc).__name__}: {exc}",
+                severity="error",
+            )
 
     def _capture_sdk_event(self, agent_id: str, event: Any) -> None:
         try:
